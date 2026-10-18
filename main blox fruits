@@ -432,6 +432,7 @@ local autoHakiEnabled         = true  -- Auto Buso Haki
 local autoObservationEnabled  = true  -- Auto Observation Haki / Instinct
 local observationState        = { char = nil, on = false, lastTry = 0, tries = 0, attempts = 0, pressedE = false, busy = false }
 local ensureObservation       -- khai báo trước để nút bật/tắt trong menu gọi được (định nghĩa ở dưới)
+local walkOnWaterEnabled      = true
 local autoRaceV3Enabled       = true
 local autoRaceV4Enabled       = true
 
@@ -665,6 +666,7 @@ local bossSpawnLocations = {
     ["Thunder God"]   = Vector3.new(-7751.00, 5606.00, -2305.00),
     ["Cyborg"]        = Vector3.new(6138.00, 294.00, 3947.00),
     ["Saber Expert"]  = Vector3.new(-1458.00, 29.00, -50.00),
+    ["Mob Leader"]    = Vector3.new(-2844.73, 7.42, 5356.67),  -- ước lượng, ưu tiên điểm hồi sinh thật
     -- Sea 2
     ["Diamond"]              = Vector3.new(-1576.70, 198.60, -3060.00),
     ["Jeremy"]               = Vector3.new(2316.00, 449.00, 787.00),
@@ -1330,29 +1332,6 @@ end
 function Q.enterIfNeeded(hrp, pos)
     if not hrp or not pos then return false end
 
-    -- SEA 1: shared exit from Underwater City for outside destinations.
-    if World1 and hrp.Position.X > 50000 and pos.X < 50000 then
-        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if root then
-            local ok, stillTravelling = pcall(function()
-                return Q.flyToUnderwaterExit(root)
-            end)
-            local liveRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if liveRoot and liveRoot.Position.X > 50000 then
-                if not ok or stillTravelling == false then
-                    Q.exitNearAt = nil
-                    Q.exitTouchAt = nil
-                end
-                return true
-            end
-            if not ok then
-                Q.qlog("Sea 1: exit failed; retrying Underwater City exit")
-                return true
-            end
-            hrp = liveRoot or hrp
-        end
-    end
-
     -- =========================================================
     -- SEA 2: CURSED SHIP SHARED TRANSIT COORDINATOR
     -- Các hệ thống gọi Q.enterIfNeeded đều dùng chung luồng này:
@@ -1959,8 +1938,74 @@ end)
 -- Trả về TRUE khi đang có quest (hoặc cho phép đi farm luôn),
 -- FALSE khi đang trong quá trình nhận quest.
 -- QUY TẮC: còn quest thì tuyệt đối không nhận lại / không huỷ -> làm xong mới nhận quest tiếp theo.
+-- TỰ DÒ NPC NHẬN QUEST (đề phòng game đổi vị trí đảo/NPC như bản làm lại Sea 1):
+--   0) Vị trí đã từng nhận quest thành công trong phiên này (Q.npcLearned) -> dùng trước.
+--   1) NPC có Humanoid trong workspace.NPCs nằm sát toạ độ ghi sẵn -> lấy vị trí THẬT của NPC đó.
+--   2) Toạ độ ghi sẵn đã lệch: xét NPC gần điểm hồi sinh quái nhất (cùng đảo), xoay vòng theo
+--      số lần nhận quest thất bại để lần lượt thử từng NPC.
+Q.npcLearned = Q.npcLearned or {}
+Q.npcListAt, Q.npcList = 0, {}
+function Q.questNpcCandidates()
+    if tick() - Q.npcListAt < 20 and #Q.npcList > 0 then return Q.npcList end
+    Q.npcListAt = tick()
+    local list = {}
+    local folder = workspace:FindFirstChild("NPCs")
+    if folder then
+        for _, m in ipairs(folder:GetDescendants()) do
+            if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(m) then
+                local ok, cf = pcall(function() return m:GetPivot() end)
+                if ok and cf then list[#list + 1] = {name = m.Name, pos = cf.Position} end
+            end
+        end
+    end
+    Q.npcList = list
+    return list
+end
+
+function Q.ResolveQuestNpc(questName, hardPos, mobName)
+    local learned = Q.npcLearned[questName]
+    if learned then return learned end
+    local list = Q.questNpcCandidates()
+    if #list == 0 then return hardPos end
+
+    -- 1) NPC thật nằm sát toạ độ ghi sẵn
+    local best, bd = nil, 60
+    for _, c in ipairs(list) do
+        local d = (c.pos - hardPos).Magnitude
+        if d < bd then best, bd = c, d end
+    end
+    if best and Q.questAttempts < 2 then return best.pos end
+
+    -- 2) Toạ độ lệch (hoặc nhận quest thất bại): dùng NPC gần điểm hồi sinh quái
+    local anchor
+    if mobName then
+        local okS, sp = pcall(GetQuestMobSpawn, mobName, hardPos)
+        if okS then anchor = sp end
+    end
+    anchor = anchor or hardPos
+    local scored = {}
+    for _, c in ipairs(list) do
+        local d = (c.pos - anchor).Magnitude
+        if d <= 1500 then
+            local n = string.lower(c.name)
+            -- ưu tiên tên giống NPC quest, loại bớt NPC cửa hàng/giảng dạy
+            if string.find(n, "quest", 1, true) or string.find(n, "adventurer", 1, true)
+                or string.find(n, "giver", 1, true) or string.find(n, "leader", 1, true) then d = d - 400 end
+            if string.find(n, "dealer", 1, true) or string.find(n, "teacher", 1, true)
+                or string.find(n, "shop", 1, true) or string.find(n, "trainer", 1, true) then d = d + 600 end
+            scored[#scored + 1] = {pos = c.pos, d = d, name = c.name}
+        end
+    end
+    if #scored == 0 then return hardPos end
+    table.sort(scored, function(a, b) return a.d < b.d end)
+    local pick = scored[(Q.questAttempts % math.min(#scored, 4)) + 1]
+    Q.qlog("Toạ độ NPC quest có thể đã đổi -> thử NPC:", pick.name, "cho", tostring(questName))
+    return pick.pos
+end
+
 local function claimQuestCore(questName, questLevel, mobName, questNpcPos)
     if not questName then return true end
+    questNpcPos = Q.ResolveQuestNpc(questName, questNpcPos, mobName)
     Q.currentQuestMobName = mobName
     local key = tostring(questName) .. ":" .. tostring(questLevel)
 
@@ -2040,6 +2085,11 @@ local function claimQuestCore(questName, questLevel, mobName, questNpcPos)
         cancelFarmTween()
         targetEnemy = nil
         Q.qlog("Đã nhận quest (thấy GUI), đi farm")
+        -- Nhớ vị trí nhận quest thành công để lần sau bay thẳng tới đó (kể cả khi toạ độ ghi sẵn đã lệch)
+        pcall(function()
+            local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if h then Q.npcLearned[questName] = h.Position end
+        end)
         return true
     end
 
@@ -2376,7 +2426,7 @@ local function createTab(tabName, iconText, isDefault)
 
     -- biểu tượng đơn sắc bên trái tên tab
     do
-        local iconMap = {Farm = "⚔", Boss = "♛", Raid = "☄", Gacha = "✦", Shop = "⛁", Player = "♙", Config = "⚙", ESP = "◉", Status = "▤"}
+        local iconMap = {Farm = "⚔", Boss = "♛", Raid = "☄", Gacha = "✦", Shop = "⛁", Config = "⚙", ESP = "◉", Status = "▤"}
         local ic = Instance.new("TextLabel")
         ic.Size = UDim2.new(0, 22, 1, 0)
         ic.Position = UDim2.new(0, -26, 0, 0)
@@ -2466,7 +2516,6 @@ local bossPage     = createTab("Boss", "👑", false)
 local raidPage     = createTab("Raid", "🔥", false)
 local gachaPage    = createTab("Gacha", "🎲", false)
 local shopPage     = createTab("Shop", "🛒", false)
--- Player tab removed; Walk On Water is available under Config / Farm Settings.
 local settingsPage = createTab("Config", "⚙️", false)
 
 -- =========================================================
@@ -2521,6 +2570,7 @@ do
         {"Auto Buso Haki", "Tự động Haki Vũ Trang"},
         {"Auto Observation Haki", "Tự động Haki Quan Sát"},
         {"Remove Fog", "Xóa sương mù"},
+        {"Walk On Water", "Đi trên mặt nước"},
         {"Auto Race V3", "Tự động Tộc V3"},
         {"Auto Race V4", "Tự động Tộc V4"},
         {"Anti AFK", "Chống AFK"},
@@ -2629,6 +2679,7 @@ do
         {"Tự động kích hoạt Haki Vũ Trang", "Automatically activate Armament Haki"},
         {"Tự động bật Haki Quan Sát / Instinct (Phím E)", "Automatically activate Observation Haki / Instinct (E key)"},
         {"Giảm Fog/Atmosphere để nhìn xa rõ hơn", "Reduce Fog/Atmosphere for clearer long-distance vision"},
+        {"Đứng & đi trên mặt nước không mất máu", "Stand and walk on water without taking damage"},
         {"Tự động dùng skill Tộc V3 (Phím T)", "Automatically use the Race V3 skill (T key)"},
         {"Tự động bật Thức Tỉnh Tộc V4 (Phím Y)", "Automatically activate Race V4 awakening (Y key)"},
         {"Tự động chống văng game (Disconnect) khi treo máy", "Automatically prevent AFK disconnections"},
@@ -6312,30 +6363,6 @@ end)
 end)()
 
 
--- WALK ON WATER: đặt toggle trong tab Farm Settings (Config).
--- Giữ nguyên logic WaterBase-Plane và trạng thái mặc định đang bật.
-_G.WalkonWater = true
-createToggleFeature(settingsPage, "ToggleWalkonWater", "Walk On Water",
-    "Extend the water platform while enabled", 36, true, function(state)
-        _G.WalkonWater = state
-    end)
-
-task.spawn(function()
-    while task.wait(0.5) do
-        pcall(function()
-            local map = workspace:FindFirstChild("Map")
-            local water = map and map:FindFirstChild("WaterBase-Plane")
-            if water and water:IsA("BasePart") then
-                if _G.WalkonWater then
-                    water.Size = Vector3.new(1000, 112, 1000)
-                else
-                    water.Size = Vector3.new(1000, 80, 1000)
-                end
-            end
-        end)
-    end
-end)
-
 createToggleFeature(settingsPage, nil, "Fast Attack", "Very fast, no-delay attacks for Melee, Sword, and Blox Fruit", 11, fastAttackEnabled, function(state) fastAttackEnabled = state end)
 
 -- ==================== DODGE CONFIG GLOBAL ====================
@@ -6432,6 +6459,7 @@ do
     end)
 end
 
+createToggleFeature(settingsPage, nil, "Walk On Water", "Stand and walk on water without taking damage", 31, walkOnWaterEnabled, function(state) walkOnWaterEnabled = state end)
 
 -- XUYÊN TƯỜNG (NOCLIP): mặc định BẬT, lưu vào MinhHub_Settings.json
 Q.NOCLIP = { on = true, orig = setmetatable({}, {__mode = "k"}), parts = {}, char = nil, at = 0 }
@@ -6807,8 +6835,27 @@ end)
 toggleBtn.MouseButton1Click:Connect(toggleMenu)
 closeBtn.MouseButton1Click:Connect(toggleMenu)
 
--- NOCLIP LOGIC
+-- WALK ON WATER & NOCLIP LOGIC
+local waterPlatform = Instance.new("Part")
+waterPlatform.Name = "WaterPlatform"
+waterPlatform.Size = Vector3.new(100, 1, 100)
+waterPlatform.Anchored = true
+waterPlatform.CanCollide = true
+waterPlatform.Transparency = 1
+waterPlatform.Parent = workspace
+
 RunService.Stepped:Connect(function()
+    if walkOnWaterEnabled then
+        local character = LocalPlayer.Character
+        if character and character:FindFirstChild("HumanoidRootPart") then
+            local hrp = character.HumanoidRootPart
+            if hrp.Position.Y <= 15 and hrp.Position.Y >= -100 then
+                waterPlatform.CFrame = CFrame.new(hrp.Position.X, 0, hrp.Position.Z)
+                waterPlatform.CanCollide = true
+            else waterPlatform.CanCollide = false end
+        else waterPlatform.CanCollide = false end
+    else waterPlatform.CanCollide = false end
+
     if autoFarmEnabled or autoFarmMaterialEnabled or autoRaidEnabled or _G.Dungeon or _G.AutoLawRaid or autoChestEnabled or _G.FruitPickupBusy or _G.PirateRaidBusy or _G.EliteHunter or _G.TyrantFarm or _G.TyrantSummon or (Q.SUB and Q.SUB.force) or (_G.__FlyN or 0) > 0 or _G.BuyMeleeActive == true then
         local character = LocalPlayer.Character
         if character then
@@ -6832,6 +6879,43 @@ RunService.Stepped:Connect(function()
         end
     end
 end)
+
+-- SÀN CỐ ĐỊNH TRÊN MẶT NƯỚC (200 x 2 x 200) - dùng chung toggle "Walk On Water"
+-- Mặt trên sàn luôn ở (-4603.89, 0.30, -3169.39). Không khóa CanCollide theo độ cao nhân vật,
+-- nên đứng trên Y=15 hay chưa rơi xuống vùng kiểm tra vẫn đứng được. Part bị xóa thì tự tạo lại.
+do
+    local WATER_SURFACE_POSITION = Vector3.new(-4603.89, 0.30, -3169.39)
+    local WATER_PLATFORM_SIZE = Vector3.new(200, 2, 200)
+    local fixedCF = CFrame.new(
+        WATER_SURFACE_POSITION.X,
+        WATER_SURFACE_POSITION.Y - (WATER_PLATFORM_SIZE.Y / 2),
+        WATER_SURFACE_POSITION.Z
+    )
+    local fixedPlatform = Instance.new("Part")
+    fixedPlatform.Name = "MinhHub_WaterPlatform"
+    fixedPlatform.Size = WATER_PLATFORM_SIZE
+    fixedPlatform.Anchored = true
+    fixedPlatform.CanCollide = (walkOnWaterEnabled == true)
+    fixedPlatform.CanTouch = true
+    fixedPlatform.CanQuery = true
+    fixedPlatform.Transparency = 1
+    fixedPlatform.CastShadow = false
+    fixedPlatform.Material = Enum.Material.SmoothPlastic
+    fixedPlatform.CFrame = fixedCF
+    fixedPlatform.Parent = workspace
+
+    RunService.Stepped:Connect(function()
+        if not fixedPlatform.Parent then
+            fixedPlatform.Parent = workspace
+        end
+        fixedPlatform.Anchored = true
+        fixedPlatform.Size = WATER_PLATFORM_SIZE
+        fixedPlatform.CFrame = fixedCF
+        fixedPlatform.CanCollide = (walkOnWaterEnabled == true)
+        fixedPlatform.CanTouch = true
+        fixedPlatform.CanQuery = true
+    end)
+end
 
 local function AutoHaki()
     local character = LocalPlayer.Character
@@ -8976,17 +9060,6 @@ do
         -- Sea 2 material farming shares the same Cursed Ship entrance coordinator.
         if World2 then
             return Q.enterIfNeeded(hrp, targetPos)
-        end
-
-        if MatFarm.sea == 1 and targetPos.X < 50000 and hrp.Position.X > 50000 then
-            if Q.flyToUnderwaterExit(hrp) then return true end
-            local liveRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if liveRoot and liveRoot.Position.X > 50000 then
-                Q.exitNearAt = nil
-                Q.exitTouchAt = nil
-                return true
-            end
-            return false
         end
 
         if MatFarm.sea == 1 and targetPos.X > 50000 and hrp.Position.X < 50000 then
@@ -11417,17 +11490,77 @@ function Q.DK.refreshInv(force)
     end
     scan(LocalPlayer:FindFirstChild("Backpack")); scan(LocalPlayer.Character)
     local commF = getCommF()
+    local gotInv = false
     if commF then
-        local ok, inv = pcall(function() return commF:InvokeServer("getInventory") end)
-        if ok and type(inv) == "table" then
-            for _, it in pairs(inv) do
-                if type(it) == "table" and it.Name then
-                    local c = tonumber(it.Count) or 1
-                    if it.Name == "Sweet Chalice" then res.sweet = true end
-                    if it.Name == "God's Chalice" then res.gods = res.gods + c end
-                    if it.Name == "Conjured Cocoa" then res.cocoa = res.cocoa + c end
+        -- Thử tối đa 3 lần: server đôi khi trả nil/rỗng ngay sau khi vừa nhặt/đổi đồ.
+        for attempt = 1, 3 do
+            local ok, inv = pcall(function() return commF:InvokeServer("getInventory") end)
+            if ok and type(inv) == "table" then
+                local found = 0
+                -- Duyệt đệ quy: chấp nhận cả dạng mảng phẳng lẫn dạng lồng (Materials/Items...),
+                -- tên so khớp không phân biệt hoa thường, số lượng đọc từ nhiều tên trường.
+                local function walk(t, depth)
+                    if depth > 4 then return end
+                    for k, it in pairs(t) do
+                        if type(it) == "table" then
+                            local hasCount = it.Count or it.count or it.Amount or it.Quantity
+                            -- Dạng map: inv["Conjured Cocoa"] = {Count = 13} (không có trường Name) -> lấy tên từ key.
+                            local nm = it.Name or it.name or it.ItemName or (hasCount and type(k) == "string" and k or nil)
+                            if type(nm) == "string" then
+                                found = found + 1
+                                local n = string.lower((nm:gsub("^%s+", ""):gsub("%s+$", "")))
+                                local c = tonumber(it.Count) or tonumber(it.count) or tonumber(it.Amount)
+                                    or tonumber(it.Quantity) or tonumber(it.Value) or 1
+                                if n == "sweet chalice" then res.sweet = true end
+                                if n == "god's chalice" or n == "gods chalice" then res.gods = res.gods + c end
+                                if n == "conjured cocoa" then res.cocoa = res.cocoa + c end
+                            else
+                                walk(it, depth + 1)
+                            end
+                        elseif type(k) == "string" and type(it) == "number" then
+                            -- Dạng map: ["Conjured Cocoa"] = 13
+                            local n = string.lower(k)
+                            if n == "sweet chalice" and it > 0 then res.sweet = true end
+                            if n == "god's chalice" or n == "gods chalice" then res.gods = res.gods + it end
+                            if n == "conjured cocoa" then res.cocoa = res.cocoa + it end
+                            found = found + 1
+                        end
+                    end
                 end
+                walk(inv, 0)
+                if found > 0 then gotInv = true; break end
             end
+            task.wait(0.3)
+        end
+    end
+
+    -- Không đọc được kho đồ lần này -> giữ số liệu tốt gần nhất, KHÔNG ghi đè bằng 0
+    -- (nguyên nhân hiển thị "Farm Conjured Cocoa 0/10" dù trong túi đã có 13).
+    if not gotInv and Q.DK.inv and Q.DK.invGood then
+        res.gods = math.max(res.gods, Q.DK.inv.gods or 0)
+        res.cocoa = math.max(res.cocoa, Q.DK.inv.cocoa or 0)
+        res.sweet = res.sweet or Q.DK.inv.sweet
+        Q.DK.invAt = tick() - 3  -- thử đọc lại sớm hơn (sau ~1s)
+    elseif gotInv then
+        Q.DK.invGood = true
+        if res.cocoa == 0 and not Q.DK._dbgPrinted then
+            -- Chẩn đoán một lần: in vài tên vật phẩm nhận được để biết server trả dạng gì.
+            Q.DK._dbgPrinted = true
+            pcall(function()
+                local names = {}
+                local function dump(t, d)
+                    if d > 3 or #names >= 12 then return end
+                    for k, it in pairs(t) do
+                        if type(it) == "table" then
+                            local nm = it.Name or it.name or (type(k) == "string" and k or nil)
+                            if nm then names[#names + 1] = tostring(nm) .. "x" .. tostring(it.Count or it.Amount or "?")
+                            else dump(it, d + 1) end
+                        end
+                    end
+                end
+                dump(commF and commF:InvokeServer("getInventory") or {}, 0)
+                print("[DoughKing] Không thấy Conjured Cocoa trong getInventory. Mẫu dữ liệu:", table.concat(names, ", "))
+            end)
         end
     end
     Q.DK.inv = res
@@ -11643,6 +11776,28 @@ function Q.DK.step()
 
     -- 1) Chưa có Sweet Chalice
     local inv = Q.DK.refreshInv(false)
+    if not Q.DK.invGood then
+        -- Chưa đọc được kho đồ: thử lại vài lần, nếu vẫn không được thì KHÔNG kẹt mãi ở đây.
+        Q.DK.invFail = (Q.DK.invFail or 0) + 1
+        if Q.DK.invFail <= 3 then
+            Q.DK.setStatus("Đang đọc kho đồ... (" .. Q.DK.invFail .. "/3)")
+            Q.DK.invAt = 0
+            return
+        end
+        Q.DK.invUnknown = true
+    else
+        Q.DK.invFail = 0
+        Q.DK.invUnknown = false
+    end
+    -- Không đọc được số vật liệu: thử đổi Sweet Chalice thẳng ở NPC (server tự kiểm tra đủ đồ chưa),
+    -- mỗi 90 giây một lần; không đủ thì đi farm tiếp như bình thường.
+    if Q.DK.invUnknown and not inv.sweet and tick() - (Q.DK.lastBlindCraft or 0) > 90 then
+        Q.DK.lastBlindCraft = tick()
+        Q.DK.stopFarms()
+        Q.DK.setStatus("Không đọc được kho đồ — thử đổi Sweet Chalice trực tiếp")
+        Q.DK.craftSweetChalice()
+        return
+    end
     if not inv.sweet then
         if inv.gods >= 1 and inv.cocoa >= 10 then
             Q.DK.stopFarms()
@@ -11732,6 +11887,689 @@ _G.DoughKing = function(on)
 end
 
 -- =========================================================
+-- AUTO SABER (Sea 1) — tự làm chuỗi nhiệm vụ lấy kiếm Saber:
+--   1) Jungle: giẫm 5 nút (plates)      2) Phòng đố Jungle: lấy đuốc (Torch)
+--   3) Desert: đốt cửa gỗ bằng đuốc     4) Desert: lấy cốc (Cup)
+--   5) Frozen Village: hứng nước vào cốc, đưa cho Sick Man
+--   6) Pirate Village: nói chuyện Rich Man -> đánh Mob Leader -> nhận Relic
+--   7) Jungle: đặt Relic vào cửa bí mật -> đánh Saber Expert -> nhận Saber
+-- Tiến trình lấy từ server: CommF_:InvokeServer("ProQuestProgress") (bảng
+-- UsedTorch / UsedCup / TalkedSon / KilledMob / UsedRelic). Nếu server không trả
+-- bảng này, script tự dò theo vật phẩm trong túi (Torch / Cup / Relic).
+-- Mọi bước đều ghi log "[Saber]" ở F9 để dễ chỉnh khi game đổi.
+-- =========================================================
+Q.SB = { on = false, running = false, status = "Disabled", lastStage = "", plateAt = 0, plated = false,
+         lastTry = {}, bossAt = 0 }
+
+function Q.SB.setStatus(t)
+    Q.SB.status = t
+end
+function Q.SB.log(...)
+    print("[Saber]", ...)
+    pcall(Q.qlog, "Saber:", ...)
+end
+
+function Q.SB.root()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+end
+
+-- Nhật ký tối đa mỗi `gap` giây cho mỗi khoá, tránh spam khi bước chạy lặp.
+function Q.SB.every(key, gap)
+    local now = tick()
+    if now - (Q.SB.lastTry[key] or 0) < gap then return false end
+    Q.SB.lastTry[key] = now
+    return true
+end
+
+function Q.SB.fly(pos, sp)
+    local root = Q.SB.root()
+    if not root then return false end
+    if typeof(pos) == "CFrame" then pos = pos.Position end
+    if (root.Position - pos).Magnitude <= 8 then return true end
+    pcall(function()
+        flyTo(CFrame.new(pos), math.max(flySpeed or 190, sp or 220), function()
+            return Q.SB.on and LocalPlayer.Character ~= nil
+        end)
+    end)
+    return true
+end
+
+function Q.SB.progress()
+    local commF = getCommF()
+    if not commF then return nil end
+    local ok, p = pcall(function() return commF:InvokeServer("ProQuestProgress") end)
+    if ok and type(p) == "table" then return p end
+    return nil
+end
+
+function Q.SB.hasTool(frag)
+    frag = string.lower(frag)
+    local function scan(c)
+        if not c then return nil end
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") and string.find(string.lower(t.Name), frag, 1, true) then return t end
+        end
+    end
+    return scan(LocalPlayer:FindFirstChild("Backpack")) or scan(LocalPlayer.Character)
+end
+
+function Q.SB.equip(tool)
+    local _, hum = Q.SB.root()
+    if tool and hum and tool.Parent ~= LocalPlayer.Character then pcall(function() hum:EquipTool(tool) end) end
+end
+
+-- Đã có Saber chưa (túi / nhân vật / kho đồ server)
+function Q.SB.hasSaber()
+    if Q.SB.hasTool("saber") then
+        local t = Q.SB.hasTool("saber")
+        if t and not string.find(string.lower(t.Name), "expert", 1, true) then return true end
+    end
+    local commF = getCommF()
+    if commF then
+        local ok, inv = pcall(function() return commF:InvokeServer("getInventory") end)
+        if ok and type(inv) == "table" then
+            local found = false
+            local function walk(t, d)
+                if d > 3 or found then return end
+                for k, it in pairs(t) do
+                    if type(it) == "table" then
+                        local nm = it.Name or it.name or (type(k) == "string" and k or nil)
+                        if type(nm) == "string" and string.lower(nm) == "saber" then found = true return end
+                        walk(it, d + 1)
+                    end
+                end
+            end
+            walk(inv, 0)
+            return found
+        end
+    end
+    return false
+end
+
+-- Tìm Part/Model theo từ khoá tên trong một khu vực (mặc định workspace.Map)
+function Q.SB.findAll(patterns, scope)
+    local out = {}
+    local root = scope or workspace:FindFirstChild("Map") or workspace
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("BasePart") or d:IsA("Model") then
+            local n = string.lower(d.Name)
+            for _, p in ipairs(patterns) do
+                if string.find(n, p, 1, true) then out[#out + 1] = d break end
+            end
+        end
+    end
+    return out
+end
+
+function Q.SB.posOf(o)
+    if o:IsA("BasePart") then return o.Position end
+    local ok, cf = pcall(function() return o:GetPivot() end)
+    return ok and cf.Position or nil
+end
+
+-- Chạm / kích hoạt một đối tượng: firetouchinterest + ProximityPrompt + ClickDetector
+function Q.SB.activate(o)
+    local root = Q.SB.root()
+    if not root or not o then return end
+    local parts = {}
+    if o:IsA("BasePart") then parts[1] = o end
+    for _, d in ipairs(o:GetDescendants()) do
+        if d:IsA("BasePart") and #parts < 6 then parts[#parts + 1] = d end
+    end
+    for _, p in ipairs(parts) do
+        if typeof(firetouchinterest) == "function" then
+            pcall(function() firetouchinterest(root, p, 0); task.wait(0.05); firetouchinterest(root, p, 1) end)
+        end
+    end
+    for _, d in ipairs(o:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and typeof(fireproximityprompt) == "function" then
+            pcall(function() d.HoldDuration = 0; fireproximityprompt(d) end)
+        elseif d:IsA("ClickDetector") and typeof(fireclickdetector) == "function" then
+            pcall(function() fireclickdetector(d) end)
+        end
+    end
+end
+
+-- Bay tới đối tượng rồi kích hoạt. Trả về true nếu đã tới nơi.
+function Q.SB.goAndActivate(o, hold)
+    local pos = Q.SB.posOf(o)
+    if not pos then return false end
+    Q.SB.fly(pos + Vector3.new(0, 3, 0))
+    Q.SB.activate(o)
+    task.wait(hold or 0.6)
+    return true
+end
+
+-- Nói chuyện NPC (không phụ thuộc Q.DK.on). Bấm các nút hội thoại phù hợp tới khi stopFn() hoặc hết giờ.
+function Q.SB.talk(npc, words, stopFn, maxSec)
+    local pos = Q.SB.posOf(npc)
+    if not pos then return false end
+    Q.SB.fly(pos + Vector3.new(0, 3, 0))
+    pcall(Q.submergedOpenDialog, npc)
+    local t0, lastClick, lastOpen, clicked = tick(), 0, tick(), false
+    while Q.SB.on and tick() - t0 < (maxSec or 12) do
+        task.wait(0.3)
+        if stopFn and stopFn() then return true end
+        local btn
+        for _, w in ipairs(words) do
+            local okB, b = pcall(Q.submergedFindButton, w)
+            if okB and b then btn = b break end
+        end
+        if btn then
+            if tick() - lastClick > 0.8 then
+                lastClick = tick(); clicked = true
+                pcall(Q.submergedClickGui, btn)
+            end
+        elseif tick() - lastOpen > 2.5 and not clicked then
+            lastOpen = tick()
+            pcall(Q.submergedOpenDialog, npc)
+        end
+    end
+    return clicked
+end
+
+-- Gọi remote quest, thử lần lượt các biến thể tên; trả về kết quả đầu tiên khác nil
+function Q.SB.invoke(variants)
+    local commF = getCommF()
+    if not commF then return nil end
+    for _, args in ipairs(variants) do
+        local ok, r = pcall(function() return commF:InvokeServer(table.unpack(args)) end)
+        Q.SB.log("remote", table.concat((function() local t = {} for i, a in ipairs(args) do t[i] = tostring(a) end return t end)(), ","), "->", tostring(r))
+        if ok and r ~= nil then return r end
+    end
+    return nil
+end
+
+-- ---------- Từng bước ----------
+
+-- 1) Giẫm các nút ở Jungle
+function Q.SB.doPlates()
+    Q.SB.setStatus("Jungle: giẫm các nút (plates)")
+    local jungle = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Jungle")
+    local plates = {}
+    if jungle then
+        local qp = jungle:FindFirstChild("QuestPlates")
+        local scope = qp or jungle
+        for _, o in ipairs(Q.SB.findAll({"plate", "button"}, scope)) do
+            if o:IsA("BasePart") then plates[#plates + 1] = o end
+        end
+    end
+    if #plates == 0 then
+        Q.SB.log("không thấy plates trong Map.Jungle (có thể chưa tải) — bay tới giữa Jungle")
+        Q.SB.fly(Vector3.new(-1250, 40, 360))
+        return false
+    end
+    for _, p in ipairs(plates) do
+        if not Q.SB.on then return false end
+        Q.SB.goAndActivate(p, 0.7)
+    end
+    Q.SB.plated = true
+    return true
+end
+
+-- 2) Lấy đuốc trong phòng đố Jungle
+function Q.SB.doTorch()
+    -- Đuốc CHỈ hợp lệ khi nhặt ở phòng đố Jungle (người dùng xác nhận toạ độ). Không gọi remote từ xa.
+    local TORCH = Vector3.new(-1679.05, 20.55, 170.33)
+    Q.SB.setStatus("Jungle: nhặt đuốc ở phòng đố")
+    local root = Q.SB.root()
+    if not root then return false end
+
+    if (root.Position - TORCH).Magnitude > 6 then
+        Q.SB.torchAt = nil
+        Q.SB.fly(TORCH)
+        -- tween bỏ qua khi <=10 stud nên đặt thẳng vào điểm đứng
+        local r2 = Q.SB.root()
+        if r2 and (r2.Position - TORCH).Magnitude < 16 then
+            pcall(function() r2.CFrame = CFrame.new(TORCH) * (r2.CFrame - r2.CFrame.Position) end)
+            r2.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+        return false
+    end
+
+    -- Đã tới điểm nhặt đuốc: đứng yên, kích hoạt mọi đối tượng "torch" trong 15 stud
+    Q.SB.torchAt = Q.SB.torchAt or tick()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if (d:IsA("BasePart") or d:IsA("Model")) and string.find(string.lower(d.Name), "torch", 1, true)
+            and not (LocalPlayer.Character and d:IsDescendantOf(LocalPlayer.Character))
+            and not d:IsDescendantOf(LocalPlayer) then
+            local pos = Q.SB.posOf(d)
+            if pos and (pos - TORCH).Magnitude <= 15 then Q.SB.activate(d) end
+        end
+    end
+    if Q.SB.every("torchLog", 20) then
+        Q.SB.log("đang đứng ở điểm nhặt đuốc; có tool torch =", tostring(Q.SB.hasTool("torch") ~= nil))
+    end
+    -- Nhặt đuốc bằng cách đi tới sát tường: đứng đủ 3 giây rồi coi như xong
+    if tick() - Q.SB.torchAt >= 3 and Q.SB.hasTool("torch") then
+        Q.SB.torchOk = true
+        Q.SB.log("đã nhặt đuốc ở phòng đố")
+        return true
+    end
+    return false
+end
+
+-- 3) Đốt cửa gỗ ở Desert bằng đuốc
+-- Chẩn đoán cửa gỗ + đuốc: in ra F9 và tự copy vào clipboard (nếu executor hỗ trợ) để gửi cho dev.
+function Q.SB.dumpDoor(tool, near)
+    local out = {"=== SABER DOOR DEBUG ==="}
+    local function add(t) out[#out + 1] = t end
+    local p = Q.SB.progress()
+    if p then
+        local kv = {}
+        for k, v in pairs(p) do kv[#kv + 1] = tostring(k) .. "=" .. tostring(v) end
+        add("ProQuestProgress: " .. table.concat(kv, ", "))
+    else
+        add("ProQuestProgress: (không trả bảng)")
+    end
+    add("Torch tool: " .. tostring(tool and tool.Name) .. " | Parent=" .. tostring(tool and tool.Parent and tool.Parent.Name)
+        .. " | RequiresHandle=" .. tostring(tool and tool.RequiresHandle) .. " | ToolTip=" .. tostring(tool and tool.ToolTip))
+    if tool then
+        local n = 0
+        for _, d in ipairs(tool:GetDescendants()) do
+            n = n + 1
+            if n > 25 then break end
+            add("  tool> " .. d.ClassName .. " " .. d.Name)
+        end
+        local attrs = {}
+        for k, v in pairs(tool:GetAttributes()) do attrs[#attrs + 1] = tostring(k) .. "=" .. tostring(v) end
+        if #attrs > 0 then add("  tool attrs: " .. table.concat(attrs, ", ")) end
+    end
+    local root = Q.SB.root()
+    add("Vị trí nhân vật: " .. (root and tostring(root.Position) or "?"))
+    local n = 0
+    for _, d in ipairs(near) do
+        n = n + 1
+        if n > 40 then break end
+        local kids = {}
+        for _, c in ipairs(d:GetChildren()) do kids[#kids + 1] = c.ClassName end
+        add(("  part> %s [%s] parent=%s collide=%s transp=%s mat=%s pos=%s kids=%s"):format(
+            d.Name, d.ClassName, tostring(d.Parent and d.Parent.Name), tostring(d.CanCollide),
+            tostring(d.Transparency), tostring(d.Material), tostring(d.Position), table.concat(kids, "/")))
+    end
+    local text = table.concat(out, "\n")
+    print(text)
+    if typeof(setclipboard) == "function" then
+        pcall(function() setclipboard(text) end)
+        pcall(function()
+            game:GetService("StarterGui"):SetCore("SendNotification", {
+                Title = "Auto Saber", Text = "Đã copy log cửa gỗ vào clipboard — dán gửi dev", Duration = 8 })
+        end)
+    end
+end
+
+function Q.SB.doBurn()
+    Q.SB.setStatus("Desert: đốt cửa gỗ bằng đuốc")
+    local tool = Q.SB.hasTool("torch")
+    if not tool then return end
+    Q.SB.equip(tool)
+
+    -- Vị trí cửa gỗ cần đốt (do người dùng xác nhận bằng ảnh + toạ độ).
+    -- DOOR = đúng điểm đứng của người chơi trước cửa (toạ độ nhân vật), nên bay thẳng tới đó, không cộng thêm độ cao.
+    local DOOR = Vector3.new(1122.85, -0.08, 4388.49)
+    local root = Q.SB.root()
+    if not root then return end
+    if (root.Position - DOOR).Magnitude > 14 then
+        Q.SB.setStatus("Desert: bay tới cửa gỗ để đốt")
+        -- Bay tới gần rồi đặt chính xác vào điểm đứng (tween bỏ qua khoảng cách <=10 nên đặt CFrame trực tiếp)
+        Q.SB.fly(DOOR + Vector3.new(0, 6, 0))
+        local r2 = Q.SB.root()
+        if r2 and (r2.Position - DOOR).Magnitude < 14 then
+            pcall(function() r2.CFrame = CFrame.new(DOOR) * (r2.CFrame - r2.CFrame.Position) end)
+            r2.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+        return
+    end
+
+    -- Chỉ gọi remote thử tối đa mỗi 20 giây (tránh spam server)
+    if Q.SB.every("burnRemote", 25) then
+        -- Thử nhiều tên lệnh có thể dùng cho bước đốt cửa; kết quả nào khác nil được ghi log "[Saber] remote ..."
+        local names = {"DrinkTorch", "UseTorch", "BurnDoor", "DesertBurn", "Torch", "Burn", "TorchDoor", "UseTorchDoor", "PlaceTorch"}
+        local variants = {}
+        for _, n in ipairs(names) do variants[#variants + 1] = {"ProQuestProgress", n} end
+        Q.SB.invoke(variants)
+    end
+
+    -- Quét vị trí đứng quanh cửa (mỗi lượt một vị trí) vì đuốc có thể chỉ cháy ở đúng điểm chạm
+    Q.SB.burnIdx = (Q.SB.burnIdx or 0) % 9 + 1
+    local OFFS = {Vector3.new(0, 0, 0), Vector3.new(-2, 0, 0), Vector3.new(2, 0, 0), Vector3.new(0, 0, -2), Vector3.new(0, 0, 2),
+                  Vector3.new(0, 0, -4), Vector3.new(0, 0, 4), Vector3.new(-4, 0, 0), Vector3.new(4, 0, 0)}
+    pcall(function()
+        local r = Q.SB.root()
+        if r then
+            r.CFrame = CFrame.new(DOOR + OFFS[Q.SB.burnIdx]) * (r.CFrame - r.CFrame.Position)
+            r.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+    end)
+
+    -- Kích hoạt mọi ProximityPrompt / ClickDetector trong 25 stud quanh cửa (toàn workspace, không chỉ Map)
+    if Q.SB.every("burnPrompts", 5) then
+        local cnt = 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
+                local par = d.Parent
+                local pos = par and (par:IsA("BasePart") and par.Position or (par:IsA("Attachment") and par.WorldPosition))
+                if pos and (pos - DOOR).Magnitude <= 25 then
+                    cnt = cnt + 1
+                    Q.SB.log("kích hoạt", d.ClassName, d.Name, "trên", par.Name, "action=" .. tostring(d.ClassName == "ProximityPrompt" and d.ActionText or ""))
+                    if d:IsA("ProximityPrompt") and typeof(fireproximityprompt) == "function" then
+                        pcall(function() d.HoldDuration = 0; fireproximityprompt(d) end)
+                    elseif typeof(fireclickdetector) == "function" then
+                        pcall(function() fireclickdetector(d) end)
+                    end
+                end
+            end
+        end
+        if cnt == 0 then Q.SB.log("không có ProximityPrompt/ClickDetector nào trong 25 stud quanh cửa") end
+    end
+
+    -- Gửi phím tương tác thông dụng (E/F) nếu cửa dùng ProximityPrompt kiểu phím
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        for _, key in ipairs({Enum.KeyCode.E, Enum.KeyCode.F}) do
+            vim:SendKeyEvent(true, key, false, game); task.wait(0.05); vim:SendKeyEvent(false, key, false, game)
+        end
+    end)
+
+    -- Liệt kê các Part quanh cửa (bán kính 20 stud) để chạm bằng đuốc + ghi log tên để chỉnh sau.
+    local near, names, seen = {}, {}, {}
+    local mapF = workspace:FindFirstChild("Map") or workspace
+    for _, d in ipairs(mapF:GetDescendants()) do
+        if d:IsA("BasePart") and (d.Position - DOOR).Magnitude <= 20 then
+            near[#near + 1] = d
+            local key = d.Name .. "/" .. tostring(d.Parent and d.Parent.Name)
+            if not seen[key] and #names < 15 then seen[key] = true; names[#names + 1] = key end
+        end
+    end
+    if Q.SB.every("burnNames", 30) then
+        Q.SB.log("Part gần cửa gỗ:", table.concat(names, ", "))
+    end
+
+    -- Quay mặt về phía cửa: lấy Part gần tâm cửa nhất (ưu tiên tên burn/door/wood/fire)
+    local face, fd = nil, math.huge
+    for _, d in ipairs(near) do
+        local n = string.lower(d.Name)
+        local bonus = (string.find(n, "burn", 1, true) or string.find(n, "door", 1, true)
+            or string.find(n, "wood", 1, true) or string.find(n, "fire", 1, true)) and 8 or 0
+        local dist = (d.Position - DOOR).Magnitude - bonus
+        if dist < fd then face, fd = d, dist end
+    end
+    if face then
+        pcall(function()
+            local flat = Vector3.new(face.Position.X, root.Position.Y, face.Position.Z)
+            if (flat - root.Position).Magnitude > 0.5 then root.CFrame = CFrame.lookAt(root.Position, flat) end
+        end)
+    end
+
+    -- Dùng đuốc: Activate + chạm Handle vào từng Part quanh cửa + kích hoạt prompt/click
+    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+    if Q.SB.every("burnDump", 60) then Q.SB.dumpDoor(tool, near) end
+
+    -- (a) Bắn mọi Remote nằm trong chính cây đuốc (nếu đuốc có script riêng)
+    if Q.SB.every("burnToolRemotes", 15) then
+        for _, d in ipairs(tool:GetDescendants()) do
+            if d:IsA("RemoteEvent") then pcall(function() d:FireServer() end)
+            elseif d:IsA("RemoteFunction") then pcall(function() d:InvokeServer() end) end
+        end
+    end
+    -- (b) Đi bộ ép sát vào cửa (đuốc cần chạm vật lý thật)
+    pcall(function()
+        local _, hum = Q.SB.root()
+        if hum and face then hum:MoveTo(face.Position) end
+    end)
+    -- (c) Click chuột thật qua VirtualInputManager (kích Tool.Activated giống người chơi)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(800, 600)
+        vim:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 1)
+        task.wait(0.15)
+        vim:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 1)
+    end)
+    pcall(function() tool:Activate() end)
+    for _, d in ipairs(near) do
+        if handle and typeof(firetouchinterest) == "function" then
+            pcall(function() firetouchinterest(handle, d, 0); firetouchinterest(handle, d, 1) end)
+        end
+        for _, c in ipairs(d:GetChildren()) do
+            if c:IsA("ProximityPrompt") and typeof(fireproximityprompt) == "function" then
+                pcall(function() c.HoldDuration = 0; fireproximityprompt(c) end)
+            elseif c:IsA("ClickDetector") and typeof(fireclickdetector) == "function" then
+                pcall(function() fireclickdetector(c) end)
+            end
+        end
+    end
+    -- Giả lập click chuột (tool có thể cần Activate bằng chuột thật)
+    pcall(function()
+        if VirtualUser then
+            VirtualUser:Button1Down(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+            task.wait(0.1)
+            VirtualUser:Button1Up(Vector2.new(0, 0), workspace.CurrentCamera.CFrame)
+        end
+    end)
+    task.wait(1.2)
+end
+
+-- 4) Lấy cốc ở Desert
+function Q.SB.doCup()
+    Q.SB.setStatus("Desert: lấy cốc (Cup)")
+    if Q.SB.hasTool("cup") then return true end
+    Q.SB.invoke({ {"ProQuestProgress", "GetCup"} })
+    if Q.SB.hasTool("cup") then return true end
+    local desert = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Desert")
+    local cands = desert and Q.SB.findAll({"cup"}, desert) or {}
+    for _, o in ipairs(cands) do
+        if Q.SB.goAndActivate(o, 0.8) and Q.SB.hasTool("cup") then return true end
+    end
+    return Q.SB.hasTool("cup") ~= nil
+end
+
+-- 5) Hứng nước ở Frozen Village rồi đưa cho Sick Man
+function Q.SB.doWaterAndSickMan()
+    local cup = Q.SB.hasTool("cup")
+    if cup then
+        Q.SB.equip(cup)
+        Q.SB.setStatus("Frozen Village: hứng nước vào cốc")
+        Q.SB.invoke({ {"ProQuestProgress", "FillCup", cup}, {"ProQuestProgress", "FillCup"} })
+        local frozen = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Frozen")
+        for _, o in ipairs(frozen and Q.SB.findAll({"drip", "water", "stalactite"}, frozen) or {}) do
+            Q.SB.goAndActivate(o, 1.2)
+        end
+    end
+    Q.SB.setStatus("Frozen Village: đưa cốc cho Sick Man")
+    Q.SB.invoke({ {"ProQuestProgress", "SickMan"} })
+    local npc = Q.DK.findNpc("sickman") or Q.DK.findNpc("sick")
+    if npc then
+        Q.SB.talk(npc, {"help", "yes", "accept", "ok"}, nil, 10)
+    else
+        Q.SB.fly(Vector3.new(1100, 120, -1250))
+    end
+end
+
+-- 6) Rich Man (Pirate Village): lần 1 nghe kể bị cướp, lần 2 sau khi diệt Mob Leader thì nhận Relic
+function Q.SB.doRichMan()
+    Q.SB.setStatus("Pirate Village: nói chuyện Rich Man")
+    Q.SB.invoke({ {"ProQuestProgress", "RichSon"} })
+    local npc = Q.DK.findNpc("richman") or Q.DK.findNpc("rich")
+    if npc then
+        Q.SB.talk(npc, {"yes", "ok", "accept", "help"}, nil, 10)
+    else
+        Q.SB.fly(Vector3.new(-1150, 25, 3850))
+    end
+end
+
+-- Đánh boss bằng vòng Auto Farm Boss có sẵn
+function Q.SB.fightBoss(name)
+    if _G.EliteHunter then Q.DK.stopFarms() end
+    if selectedBossTarget ~= name or selectedFarmTarget ~= "Farm Boss" or not autoFarmEnabled then
+        Q.DK.stopFarms()
+        selectedBossTarget = name
+        selectedFarmTarget = "Farm Boss"
+        pcall(function() bossDropdownLabel.Text = "👑 Boss: " .. name end)
+        autoFarmEnabled = true
+        Q.SB.log("bật Auto Farm Boss ->", name)
+    end
+end
+
+function Q.SB.stopBoss()
+    if selectedFarmTarget == "Farm Boss" and autoFarmEnabled then
+        autoFarmEnabled = false
+        if toggleUpdateFuncs["AutoFarmBossToggle"] then pcall(toggleUpdateFuncs["AutoFarmBossToggle"], false) end
+    end
+end
+
+-- 7) Đặt Relic vào cửa bí mật ở Jungle
+function Q.SB.relicTool()
+    return Q.SB.hasTool("relic") or Q.SB.hasTool("cross") or Q.SB.hasTool("key")
+end
+
+function Q.SB.doRelic()
+    -- Cửa bí mật có hình chữ thập (người dùng xác nhận toạ độ + ảnh), cạnh phòng Saber Expert.
+    local DOOR = Vector3.new(-1460.58, 42.45, 47.87)
+    Q.SB.setStatus("Jungle: đặt Relic mở cửa bí mật")
+    local relic = Q.SB.relicTool()
+    if relic then Q.SB.equip(relic) end
+    local root = Q.SB.root()
+    if not root then return end
+
+    if (root.Position - DOOR).Magnitude > 8 then
+        Q.SB.fly(DOOR)
+        local r2 = Q.SB.root()
+        if r2 and (r2.Position - DOOR).Magnitude < 16 then
+            pcall(function() r2.CFrame = CFrame.new(DOOR) * (r2.CFrame - r2.CFrame.Position) end)
+            r2.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        end
+        return
+    end
+
+    if Q.SB.every("relicRemote", 15) then
+        Q.SB.invoke({ {"ProQuestProgress", "PlaceRelic"} })
+    end
+
+    -- Kích hoạt mọi prompt/click/part có tên liên quan trong 20 stud quanh cửa
+    local handle = relic and (relic:FindFirstChild("Handle") or relic:FindFirstChildWhichIsA("BasePart"))
+    local root2 = Q.SB.root()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        local isP = d:IsA("ProximityPrompt") or d:IsA("ClickDetector")
+        if isP or d:IsA("BasePart") then
+            local par = isP and d.Parent or d
+            local pos = par and par:IsA("BasePart") and par.Position
+            if pos and (pos - DOOR).Magnitude <= 20 and not (LocalPlayer.Character and d:IsDescendantOf(LocalPlayer.Character)) then
+                if d:IsA("ProximityPrompt") and typeof(fireproximityprompt) == "function" then
+                    pcall(function() d.HoldDuration = 0; fireproximityprompt(d) end)
+                elseif d:IsA("ClickDetector") and typeof(fireclickdetector) == "function" then
+                    pcall(function() fireclickdetector(d) end)
+                elseif d:IsA("BasePart") and handle and typeof(firetouchinterest) == "function" then
+                    pcall(function() firetouchinterest(handle, d, 0); firetouchinterest(handle, d, 1) end)
+                end
+            end
+        end
+    end
+    if relic then pcall(function() relic:Activate() end) end
+    if Q.SB.every("relicLog", 20) then Q.SB.log("đang đặt Relic tại cửa bí mật; tool =", tostring(relic and relic.Name)) end
+    task.wait(1)
+end
+
+function Q.SB.finish(msg)
+    Q.SB.setStatus(msg)
+    Q.SB.log(msg)
+    Q.SB.stopBoss()
+    Q.SB.on = false
+    if toggleUpdateFuncs["AutoSaberToggle"] then pcall(toggleUpdateFuncs["AutoSaberToggle"], false) end
+end
+
+function Q.SB.step()
+    if not World1 then Q.SB.setStatus("Chỉ có ở Sea 1 (First Sea)") return end
+    local lv = 0
+    pcall(function() lv = LocalPlayer.Data.Level.Value end)
+    if lv > 0 and lv < 200 then Q.SB.setStatus("Cần Lv 200+ (hiện Lv " .. lv .. ")") return end
+    if Q.SB.hasSaber() then Q.SB.finish("Đã có Saber ✅") return end
+
+    local p = Q.SB.progress()
+    local stage
+    if p then
+        if not p.UsedTorch then stage = "torch"
+        elseif not p.UsedCup then stage = "cup"
+        elseif not p.TalkedSon then stage = "rich1"
+        elseif not p.KilledMob then stage = "mob"
+        elseif not p.UsedRelic then stage = "relic"
+        else stage = "boss" end
+    else
+        -- Không có bảng tiến trình: suy ra từ vật phẩm trong túi
+        if Q.SB.relicTool() then stage = "relic"
+        elseif Q.SB.hasTool("cup") then stage = "cup"
+        elseif Q.SB.hasTool("torch") then stage = "torch"
+        else stage = "torch" end
+    end
+    if stage ~= Q.SB.lastStage then
+        Q.SB.lastStage = stage
+        local dump = {}
+        if p then for k, v in pairs(p) do dump[#dump + 1] = tostring(k) .. "=" .. tostring(v) end end
+        Q.SB.log("giai đoạn:", stage, "| tiến trình:", table.concat(dump, ", "))
+    end
+
+    if stage ~= "mob" and stage ~= "boss" then Q.SB.stopBoss() end
+
+    if stage == "torch" then
+        if not (Q.SB.torchOk and Q.SB.hasTool("torch")) then
+            Q.SB.torchOk = false
+            if not Q.SB.plated then Q.SB.doPlates() end
+            Q.SB.doTorch()
+        else
+            Q.SB.doBurn()
+        end
+    elseif stage == "cup" then
+        if not Q.SB.hasTool("cup") then Q.SB.doCup() else Q.SB.doWaterAndSickMan() end
+    elseif stage == "rich1" then
+        Q.SB.doRichMan()
+    elseif stage == "mob" then
+        Q.SB.setStatus("Đánh Mob Leader (Lv 120)")
+        Q.SB.fightBoss("Mob Leader")
+    elseif stage == "relic" then
+        if not Q.SB.relicTool() then
+            Q.SB.stopBoss()
+            Q.SB.doRichMan()   -- lần 2: nhận Relic
+        end
+        if Q.SB.relicTool() then Q.SB.doRelic() end
+    else
+        Q.SB.setStatus("Đánh Saber Expert (Lv 200)")
+        Q.SB.fightBoss("Saber Expert")
+    end
+end
+
+function Q.SB.loop()
+    if Q.SB.running then return end
+    Q.SB.running = true
+    while Q.SB.on do
+        task.wait(1.5)
+        local ok, err = pcall(Q.SB.step)
+        if not ok then Q.SB.log("lỗi:", tostring(err)) end
+    end
+    Q.SB.running = false
+    if Q.SB.status ~= "Đã có Saber ✅" then Q.SB.setStatus("Disabled") end
+end
+
+createToggleFeature(farmPage, "AutoSaberToggle", "Auto Saber",
+    "Sea 1: tự làm chuỗi nhiệm vụ Saber (plates Jungle → đuốc → cốc nước → Rich Man → Saber Expert)",
+    33, false, function(state)
+    Q.SB.on = state
+    if state then
+        Q.SB.lastStage = ""
+        _G.MHSpawn(Q.SB.loop)
+    else
+        Q.SB.stopBoss()
+        Q.SB.setStatus("Disabled")
+    end
+end)
+
+_G.AutoSaber = function(on)
+    if toggleUpdateFuncs["AutoSaberToggle"] then pcall(toggleUpdateFuncs["AutoSaberToggle"], on ~= false) end
+    Q.SB.on = (on ~= false)
+    if Q.SB.on then _G.MHSpawn(Q.SB.loop) end
+end
+
+-- =========================================================
 -- HIỆN TRẠNG THÁI XUỐNG ĐẢO DƯỚI NƯỚC (SEA 3)
 -- Thẻ trạng thái trong tab Auto Farm, tự cập nhật theo từng bước:
 --   bay tới NPC -> nói chuyện (bước 1/2, 2/2) -> bấm Yes -> xuống đảo
@@ -11797,6 +12635,9 @@ function Q.FS.mode()
     if _G.PirateRaidBusy then return "🏴‍☠️ Đang đánh Pirate Raid (Sea 3)", Color3.fromRGB(255, 120, 80) end
     if Q.DK and Q.DK.on then
         return "🍩 Auto Dough King: " .. tostring(Q.DK.status), Color3.fromRGB(255, 180, 60)
+    end
+    if Q.SB and Q.SB.on then
+        return "⚔️ Auto Saber: " .. tostring(Q.SB.status), Color3.fromRGB(120, 200, 255)
     end
     if _G.EliteHunter then return "👹 Elite Hunter: " .. tostring(EH.status), Color3.fromRGB(255, 120, 80) end
     if _G.TyrantFarm or _G.TyrantSummon then
@@ -12825,38 +13666,6 @@ _G.MHSpawn(function()
                     error("Chưa vào được Underwater City sau 75 giây. Hãy kiểm tra cổng xoáy Sea 1 và thử lại.")
                 end
                 setStatus("Đã vào Underwater City — đang bay tới NPC Fishman Karate (tốc độ 190)...")
-            end
-
-            -- Sea 1: exit Underwater City before traveling to a fighting-style NPC outside.
-            if World1 then
-                local transitDeadline = os.clock() + 75
-                while os.clock() < transitDeadline do
-                    if not (Q.MeleeShop.running and Q.MeleeShop.token == token and _G.BuyMeleeActive == true) then
-                        failureMessage = "Fighting-style purchase canceled."
-                        return
-                    end
-                    local root = getRoot()
-                    if not root then
-                        task.wait(0.25)
-                    elseif root.Position.X <= 50000 or npcPos.X >= 50000 then
-                        break
-                    else
-                        local transitOk, transitResult = pcall(function()
-                            return Q.flyToUnderwaterExit(root)
-                        end)
-                        local liveRoot = getRoot()
-                        if liveRoot and liveRoot.Position.X <= 50000 then break end
-                        if not transitOk or transitResult == false then
-                            Q.exitNearAt = nil
-                            Q.exitTouchAt = nil
-                        end
-                        task.wait(0.25)
-                    end
-                end
-                local root = getRoot()
-                if root and root.Position.X > 50000 and npcPos.X < 50000 then
-                    error("Could not exit Underwater City within 75 seconds; purchase canceled.")
-                end
             end
 
             -- Sea 2: nếu đang ở trong Thuyền Ma nhưng NPC mua võ nằm ngoài,
