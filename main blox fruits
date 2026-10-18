@@ -464,8 +464,8 @@ local lastPointSwitchTime    = 0
 -- spots = toạ độ dự phòng, chỉ dùng khi không tìm thấy điểm hồi sinh quái trong map
 local materialData = {
     ["Scrap Metal & Leather"] = {
-        [1] = { mobs  = {"Pirate", "Brute", "Gladiator", "Forest Pirate"},
-                spots = { Vector3.new(-1076.60, 27.30, 3960.73), Vector3.new(-1051.09, 27.30, 4242.90) } },
+        [1] = { mobs  = {"Pirate", "Brute"},
+                spots = { Vector3.new(-1076.60, 27.30, 3960.73)} },
         [2] = { mobs  = {"Mercenary", "Marine Captain", "Swan Pirate"},
                 spots = { Vector3.new(-2448.00, 73.00, -3210.00) } },
         [3] = { mobs  = {"Pirate Millionaire", "Pistol Billionaire"},
@@ -636,8 +636,8 @@ local currentSeaIndex = World1 and 1 or (World2 and 2 or 3)
 
 local seaBosses = {
     [1] = {
-        "Gorilla King", "Bobby", "Yeti", "Vice Admiral", "Warden", "Chief Warden", "Swan",
-        "Magma Admiral", "Fishman Lord", "Wysper", "Thunder God", "Cyborg", "Saber Expert"
+        "Gorilla King", "Chef", "Yeti", "Vice Admiral", "Greybeard", "Warden",
+        "Magma Admiral", "Fishman Lord", "Wysper", "Thunder God", "Cyborg", "Saber Expert", "Mob Leader"
     },
     [2] = {
         "Diamond", "Jeremy", "Don Swan", "Smoke Admiral", "Awakened Ice Admiral", "Tide Keeper", "Cursed Captain"
@@ -653,20 +653,19 @@ local seaBosses = {
 -- chỉ dùng bảng này khi không tìm thấy.
 local bossSpawnLocations = {
     -- Sea 1
-    ["Gorilla King"]  = Vector3.new(-1128.83, 40.46, -451.09),
-    ["Bobby"]         = Vector3.new(-1087.30, 46.90, 4040.10),
-    ["Yeti"]          = Vector3.new(1185.00, 106.00, -1518.00),
-    ["Vice Admiral"]  = Vector3.new(-5036.00, 29.00, 4325.00),
-    ["Warden"]        = Vector3.new(5278.00, 2.00, 944.00),
-    ["Chief Warden"]  = Vector3.new(5206.00, 2.00, 814.00),
-    ["Swan"]          = Vector3.new(5325.00, 7.00, 719.00),
-    ["Magma Admiral"] = Vector3.new(-5530.00, 22.00, 8859.00),
-    ["Fishman Lord"]  = Vector3.new(61260.00, 30.00, 1193.00),
-    ["Wysper"]        = Vector3.new(-7927.00, 5551.00, -637.00),
-    ["Thunder God"]   = Vector3.new(-7751.00, 5606.00, -2305.00),
-    ["Cyborg"]        = Vector3.new(6138.00, 294.00, 3947.00),
-    ["Saber Expert"]  = Vector3.new(-1458.00, 29.00, -50.00),
-    ["Mob Leader"]    = Vector3.new(-2844.73, 7.42, 5356.67),  -- ước lượng, ưu tiên điểm hồi sinh thật
+    ["Gorilla King"]  = Vector3.new(-1275.58, -4.27, -602.08),
+    ["Chef"]          = Vector3.new(-1067.30, 27.30, 3965.59),
+    ["Yeti"]          = Vector3.new(1413.50, 97.39, -1570.60),
+    ["Vice Admiral"]  = Vector3.new(-4855.60, 25.32, 4293.51),
+    ["Greybeard"]     = Vector3.new(-4855.60, 25.32, 4293.51),
+    ["Warden"]        = Vector3.new(5582.44, 4.18, 735.90),
+    ["Magma Admiral"] = Vector3.new(-5706.93, 77.77, 8759.37),
+    ["Fishman Lord"]  = Vector3.new(61352.11, 71.22, 940.53),
+    ["Wysper"]        = Vector3.new(-6225.75, 5473.75, 1877.87),
+    ["Thunder God"]   = Vector3.new(-7118.07, 5593.60, 321.77),
+    ["Cyborg"]        = Vector3.new(6056.19, 76.09, 4780.08),
+    ["Saber Expert"]  = Vector3.new(-1508.75, 39.37, 2.60),
+    ["Mob Leader"]    = Vector3.new(-2838.58, 4.18, 5331.74),  -- ước lượng, ưu tiên điểm hồi sinh thật
     -- Sea 2
     ["Diamond"]              = Vector3.new(-1576.70, 198.60, -3060.00),
     ["Jeremy"]               = Vector3.new(2316.00, 449.00, 787.00),
@@ -698,7 +697,7 @@ end
 
 local raidChipsList = {
     "Flame", "Ice", "Quake", "Light", "Dark", 
-    "Spider", "Rumble", "Magma", "Buddha", "Sand", "Dough", "Phoenix"
+    "Spider", "Magma", "Buddha", "Sand", "Dough", "Phoenix"
 }
 
 _G.MinhHubLoad(18, "Loading Auto Quest data...")
@@ -738,8 +737,8 @@ do
             {475, "SkyExp1Quest",   2, "Shanda",              V(-5954.92, 5474.16, 2087.68), V(-5959.89, 5469.16, 1846.12)},
             {525, "SkyExp2Quest",   1, "Royal Squad",         V(-7028.59, 5596.90, 1353.15), V(-6797.82, 5549.47, 1251.23)},
             {550, "SkyExp2Quest",   2, "Royal Soldier",       V(-7028.59, 5596.90, 1353.15), V(-7089.96, 5540.58, 841.68)},
-            {625, "FountainQuest",  1, "Galley Pirate",       V(5254.60, 38.50, 4049.70),     V(5557.17, 152.33, 3998.78)},
-            {650, "FountainQuest",  2, "Galley Captain",      V(5254.60, 38.50, 4049.70),     V(5677.68, 92.79, 4966.63)},
+            {625, "FountainQuest",  1, "Galley Pirate",       V(5260.69, 81.09, 4085.24),     V(5554.44, 71.13, 3822.57)},
+            {650, "FountainQuest",  2, "Galley Captain",      V(5260.69, 81.09, 4085.24),     V(5665.51, 71.13, 4975.96)},
         },
         [2] = {
             {700,  "Area1Quest",        1, "Raider",            V(-427.57, 73.31, 1835.87),     V(-728.33, 52.78, 2345.77)},
